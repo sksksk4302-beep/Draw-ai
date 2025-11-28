@@ -3,3 +3,5 @@ uvicorn
 google-cloud-aiplatform
 python-multipart
 pydantic
+Pillow
+google-cloud-storage

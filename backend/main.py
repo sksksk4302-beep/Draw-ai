@@ -52,8 +52,35 @@ async def generate_image(
         # Read the image file
         content = await file.read()
         
-        # Create Vertex AI Image object
-        input_image = Image(content)
+        # Open image using PIL to get dimensions and create mask
+        from PIL import Image as PILImage
+        
+        pil_image = PILImage.open(io.BytesIO(content))
+        
+        # Convert to RGB if needed (e.g. if RGBA)
+        if pil_image.mode != 'RGB':
+            pil_image = pil_image.convert('RGB')
+            
+        # Create a buffer for the processed input image
+        # Use tempfile to avoid BytesIO issues with Vertex AI SDK
+        import tempfile
+        
+        # Save input image to temp file
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_in:
+            pil_image.save(f_in, format="PNG")
+            input_path = f_in.name
+            
+        input_image = Image.load_from_file(input_path)
+
+        # Create a full white mask (edit everything)
+        mask_pil = PILImage.new("L", pil_image.size, 255)
+        
+        # Save mask to temp file
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_mask:
+            mask_pil.save(f_mask, format="PNG")
+            mask_path = f_mask.name
+            
+        mask_image = Image.load_from_file(mask_path)
 
         # Load the model
         # Using 'imagegeneration@006' or similar latest model
@@ -73,35 +100,55 @@ async def generate_image(
 
         # Generate Image
         # We use edit_image to transform the sketch. 
-        # Note: Depending on the specific model version, parameters might vary.
-        # We assume 'edit_image' is the correct method for image-to-image/inpainting tasks 
-        # or we use generate_images with specific guidance if supported.
-        # For this MVP, we will try to use edit_image without a mask (full image edit) if supported,
-        # or assume the model can handle it.
+        # We provide a full mask to allow editing the entire image.
+        logger.info(f"Input Image Type: {type(input_image)}")
+        logger.info(f"Mask Image Type: {type(mask_image)}")
         
-        # If edit_image requires a mask, we might need to create a full-white mask or similar.
-        # However, newer models support 'image guidance' in generate_images.
-        # Let's try the generate_images with 'image' parameter if possible, but standard SDK is usually edit_image.
-        
-        # Attempting to use edit_image which is standard for modification
-        images = model.edit_image(
-            base_image=input_image,
-            prompt=full_prompt,
-            guidance_scale=21, # Strong adherence to prompt
-            # mask=... # Optional in some versions for full image edit?
-        )
+        try:
+            images = model.edit_image(
+                base_image=input_image,
+                mask=mask_image,
+                prompt=full_prompt,
+                guidance_scale=21, # Strong adherence to prompt
+            )
+        finally:
+            # Cleanup temp files
+            if os.path.exists(input_path):
+                os.remove(input_path)
+            if os.path.exists(mask_path):
+                os.remove(mask_path)
 
         if not images:
             raise HTTPException(status_code=500, detail="No image generated")
 
+        # ... (previous code) ...
         generated_image = images[0]
 
-        # Convert to Base64
+        # Save to buffer
         output_buffer = io.BytesIO()
         generated_image.save(output_buffer, include_generation_parameters=False)
-        encoded_string = base64.b64encode(output_buffer.getvalue()).decode("utf-8")
+        image_bytes = output_buffer.getvalue()
 
-        return {"image": f"data:image/png;base64,{encoded_string}"}
+        # Upload to Cloud Storage
+        from google.cloud import storage
+        import uuid
+
+        bucket_name = f"{PROJECT_ID}-generated-images"
+        destination_blob_name = f"generated/{uuid.uuid4()}.png"
+
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(destination_blob_name)
+        
+        blob.upload_from_string(image_bytes, content_type="image/png")
+        
+        # Since we made the bucket public, we can use the public link
+        # Alternatively, blob.public_url (requires legacy ACLs usually) or construct it manually
+        public_url = f"https://storage.googleapis.com/{bucket_name}/{destination_blob_name}"
+        
+        logger.info(f"Image saved to {public_url}")
+
+        return {"image": public_url}
 
     except Exception as e:
         logger.error(f"Error generating image: {e}")
