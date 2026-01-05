@@ -1,11 +1,19 @@
 import os
 import io
-import base64
+import uuid
 import logging
+import traceback
+from typing import Optional
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+
+# Google Cloud Imports
 import vertexai
-from vertexai.preview.vision_models import ImageGenerationModel, Image
+from vertexai.generative_models import GenerativeModel, Part
+from vertexai.preview.vision_models import ImageGenerationModel
+from google.cloud import storage
+from google.cloud import discoveryengine_v1beta as discoveryengine
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -14,7 +22,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Magic Sketchbook API")
 
 # CORS Configuration
-origins = ["*"]  # For development; restrict in production
+origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -23,10 +31,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Vertex AI
+# Load Environment Variables
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
 LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+AGENT_ID = os.getenv("AGENT_ID")
 
+# Initialize Vertex AI
 if PROJECT_ID:
     try:
         vertexai.init(project=PROJECT_ID, location=LOCATION)
@@ -34,118 +44,197 @@ if PROJECT_ID:
     except Exception as e:
         logger.error(f"Failed to initialize Vertex AI: {e}")
 else:
-    logger.warning("GOOGLE_CLOUD_PROJECT env var not set. Vertex AI calls will fail.")
+    logger.warning("GOOGLE_CLOUD_PROJECT env var not set. AI calls will fail.")
 
 @app.get("/")
 async def health_check():
     return {"status": "ok", "service": "Magic Sketchbook Backend"}
 
+# ---------------------------------------------------------
+# Helper Functions
+# ---------------------------------------------------------
+
+async def analyze_image(image_bytes: bytes) -> str:
+    """
+    Stage 1 (Eye): Use Gemini 2.5 Flash to describe the sketch.
+    """
+    logger.info("Stage 1: Analyzing sketch with Gemini Vision...")
+    model = GenerativeModel("gemini-2.5-flash")
+    image_part = Part.from_data(image_bytes, mime_type="image/png")
+    
+    prompt = """
+    Describe this sketch simply and positively.
+    Focus on shapes and objects.
+    If it's abstract, describe it as 'a creative abstract shape'.
+    Do NOT use words related to violence or adult content.
+    """
+    
+    response = model.generate_content([image_part, prompt])
+    description = response.text.strip()
+    logger.info(f"👀 Gemini detected: {description}")
+    return description
+
+async def consult_agent(session_id: str, user_text: str, image_description: str) -> dict:
+    """
+    Stage 2 (Brain): Send context to Vertex AI Agent Builder.
+    Returns a dict with 'text' (agent reply) and optional 'draw_prompt' (if agent decides to draw).
+    """
+    logger.info(f"Stage 2: Consulting Agent (ID: {AGENT_ID})...")
+    
+    if not AGENT_ID:
+        logger.warning("AGENT_ID not set. Skipping agent.")
+        return {"text": "Agent ID가 설정되지 않았습니다.", "draw_prompt": None}
+
+    client = discoveryengine.ConversationalSearchServiceClient()
+    serving_config = client.serving_config_path(
+        project=PROJECT_ID,
+        location=LOCATION,
+        data_store=AGENT_ID,
+        serving_config="default_serving_config",
+    )
+
+    # Construct the input for the agent
+    # We combine the image description and the user's voice command
+    full_input = f"""
+    [상황 정보]
+    사용자가 그린 그림: {image_description}
+    사용자의 말: {user_text}
+    
+    [지시]
+    사용자의 말과 그림을 바탕으로 대답해주세요.
+    만약 사용자가 그림을 완성해달라고 하거나 새로운 그림을 요청하면,
+    그림을 그리기 위한 구체적인 영어 프롬프트를 'DRAW_PROMPT:' 접두사를 붙여서 마지막 줄에 적어주세요.
+    그렇지 않고 대화가 더 필요하면 한국어로 대답만 해주세요.
+    """
+
+    # Note: In a real app, you should manage session IDs properly
+    session_path = f"{serving_config}/sessions/{session_id}"
+
+    request = discoveryengine.ConverseConversationRequest(
+        name=session_path,
+        query=discoveryengine.TextInput(input=full_input),
+    )
+
+    response = client.converse_conversation(request=request)
+    agent_reply = response.reply.summary.summary_text if response.reply.summary else response.reply.reply
+    
+    logger.info(f"🧠 Agent Reply: {agent_reply}")
+
+    # Parse Agent Reply for Drawing Intent
+    draw_prompt = None
+    display_text = agent_reply
+
+    if "DRAW_PROMPT:" in agent_reply:
+        parts = agent_reply.split("DRAW_PROMPT:")
+        display_text = parts[0].strip()
+        draw_prompt = parts[1].strip()
+        logger.info(f"🎨 Agent decided to draw: {draw_prompt}")
+
+    return {"text": display_text, "draw_prompt": draw_prompt}
+
+async def generate_image_from_text(prompt: str) -> str:
+    """
+    Stage 3 (Hand): Generate image using Imagen.
+    Returns public URL of the generated image.
+    """
+    logger.info(f"Stage 3: Generating image with prompt: {prompt}")
+    model = ImageGenerationModel.from_pretrained("imagegeneration@006")
+    
+    final_prompt = f"""
+    {prompt}
+    Pixar style, soft lighting, vibrant friendly colors, 4k resolution, 3D render.
+    Suitable for children.
+    """
+    
+    response = model.generate_images(
+        prompt=final_prompt,
+        number_of_images=1,
+        aspect_ratio="4:3",
+        safety_filter_level="block_some",
+        person_generation="allow_adult"
+    )
+
+    if not response.images:
+        raise HTTPException(status_code=400, detail="이미지를 생성할 수 없습니다 (안전 필터).")
+
+    # Save and Upload
+    generated_image = response.images[0]
+    
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_out:
+        generated_image.save(f_out.name, include_generation_parameters=False)
+        output_path = f_out.name
+
+    try:
+        bucket_name = f"{PROJECT_ID}-generated-images"
+        destination_blob_name = f"generated/{uuid.uuid4()}.png"
+        
+        storage_client = storage.Client()
+        try:
+            bucket = storage_client.get_bucket(bucket_name)
+        except:
+            bucket = storage_client.create_bucket(bucket_name, location=LOCATION)
+
+        blob = bucket.blob(destination_blob_name)
+        blob.upload_from_filename(output_path, content_type="image/png")
+        
+        # Make public (if bucket is not public, this might fail without proper IAM)
+        # For this demo, we assume bucket is readable or we use signed URL.
+        # But to keep it simple as per previous code:
+        public_url = f"https://storage.googleapis.com/{bucket_name}/{destination_blob_name}"
+        return public_url
+    finally:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
+# ---------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------
+
+@app.post("/chat-to-draw")
+async def chat_to_draw(
+    file: Optional[UploadFile] = File(None),
+    user_text: str = Form(...),
+    session_id: str = Form("default-session")
+):
+    try:
+        # 1. Analyze Image (if provided)
+        image_desc = "이미지 없음"
+        if file:
+            image_bytes = await file.read()
+            if len(image_bytes) > 0:
+                image_desc = await analyze_image(image_bytes)
+        
+        # 2. Consult Agent
+        agent_result = await consult_agent(session_id, user_text, image_desc)
+        
+        response_data = {
+            "agent_message": agent_result["text"],
+            "generated_image": None
+        }
+
+        # 3. Generate Image (if Agent requested)
+        if agent_result["draw_prompt"]:
+            image_url = await generate_image_from_text(agent_result["draw_prompt"])
+            response_data["generated_image"] = image_url
+            
+        return response_data
+
+    except Exception as e:
+        logger.error(f"❌ Error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Keep the old endpoint for backward compatibility if needed
 @app.post("/generate-image")
-async def generate_image(
+async def generate_image_legacy(
     file: UploadFile = File(...),
     style_prompt: str = Form("3D render")
 ):
-    try:
-        if not PROJECT_ID:
-            raise HTTPException(status_code=500, detail="Server misconfigured: Missing Google Cloud Project ID")
-
-        # Read the image file
-        image_bytes = await file.read()
-        
-        logger.info("Starting two-stage generation: Gemini Vision + Imagen")
-        
-        # ---------------------------------------------------------
-        # STAGE 1: Gemini Vision - Analyze the sketch
-        # ---------------------------------------------------------
-        from vertexai.generative_models import GenerativeModel, Part
-        
-        # Use Gemini 2.5 Flash for image recognition
-        gemini_model = GenerativeModel("gemini-2.5-flash")
-        
-        # Create image part from bytes
-        image_part = Part.from_data(image_bytes, mime_type="image/png")
-        
-        # Prompt to extract the meaning of the sketch
-        vision_prompt = """
-        Describe this sketch simply and positively for a child's drawing app.
-        Focus on shapes and objects. 
-        If it's abstract or messy, describe it as 'a creative abstract colorful shape'.
-        Do NOT use words related to violence, weapons, or adult content.
-        """
-        
-        logger.info("Analyzing sketch with Gemini Vision...")
-        vision_response = gemini_model.generate_content([image_part, vision_prompt])
-        detected_object = vision_response.text.strip()
-        logger.info(f"👀 Gemini detected: {detected_object}")
-
-        # ---------------------------------------------------------
-        # STAGE 2: Imagen - Generate high-quality image
-        # ---------------------------------------------------------
-        imagen_model = ImageGenerationModel.from_pretrained("imagegeneration@006")
-        
-        # Construct the final prompt
-        final_prompt = f"""
-        A cute, 3D rendered digital art of {detected_object}.
-        Pixar style, soft lighting, vibrant friendly colors, 4k resolution.
-        Suitable for children. Style: {style_prompt}
-        """
-        
-        logger.info(f"Generating image with Imagen. Prompt: {final_prompt}")
-        
-        # Generate new image from text (not editing the original)
-        response = imagen_model.generate_images(
-            prompt=final_prompt,
-            number_of_images=1,
-            aspect_ratio="4:3",
-            safety_filter_level="block_some",
-            person_generation="allow_adult"
-        )
-
-        # Check if images were generated using response.images
-        if not response.images or len(response.images) == 0:
-            logger.error("🚫 Imagen did not generate any images. Possible safety filter block.")
-            raise HTTPException(status_code=400, detail="AI가 이 그림은 그리기 어렵대요. (안전 문제로 차단됨)")
-
-        generated_image = response.images[0]
-        logger.info(f"✅ Successfully generated image")
-
-        # Save to temporary file
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_out:
-            output_path = f_out.name
-            
-        try:
-            generated_image.save(output_path, include_generation_parameters=False)
-            with open(output_path, "rb") as f:
-                image_bytes = f.read()
-        finally:
-            if os.path.exists(output_path):
-                os.remove(output_path)
-
-        # Upload to Cloud Storage
-        from google.cloud import storage
-        import uuid
-
-        bucket_name = f"{PROJECT_ID}-generated-images"
-        destination_blob_name = f"generated/{uuid.uuid4()}.png"
-
-        storage_client = storage.Client()
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(destination_blob_name)
-        
-        blob.upload_from_string(image_bytes, content_type="image/png")
-        
-        public_url = f"https://storage.googleapis.com/{bucket_name}/{destination_blob_name}"
-        
-        logger.info(f"Image saved to {public_url}")
-        logger.info(f"Description used: {detected_object}")
-
-        return {"image": public_url, "description": detected_object}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    # Reuse the new logic but simulate a direct request
+    image_bytes = await file.read()
+    desc = await analyze_image(image_bytes)
+    # Skip agent, go straight to drawing
+    prompt = f"A cute, 3D rendered digital art of {desc}. Style: {style_prompt}"
+    url = await generate_image_from_text(prompt)
+    return {"image": url, "description": desc}
