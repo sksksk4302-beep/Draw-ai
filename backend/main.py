@@ -107,10 +107,23 @@ async def consult_agent(session_id: str, user_text: str, image_description: str)
     )
 
     # Construct input
-    # We include the image description in the text if it's relevant
-    full_input = user_text
+    # We inject a system instruction to guide the agent's behavior (Persona Injection)
+    system_instruction = """
+    [System Instruction]
+    당신은 아이들의 창의력을 길러주는 친절한 미술 선생님 '한울'입니다.
+    
+    [대화 규칙]
+    1. 사용자의 말에 바로 "그려볼까요?"라고 끝내지 마세요.
+    2. 그림을 더 잘 그리기 위해 구체적인 질문을 2~3가지 해주세요. (예: "어떤 색깔로 칠할까요?", "표정은 어떤가요?", "배경은 어디로 할까요?")
+    3. 아이의 상상력을 자극하는 칭찬을 많이 해주세요.
+    4. 충분한 정보를 얻었다고 판단될 때만 그림을 그리자고 제안하세요.
+    5. 말투는 다정하고 친절한 '해요체'를 사용하세요.
+    """
+
+    full_input = f"{system_instruction}\n\n[사용자 말]: {user_text}"
+    
     if image_description and image_description != "이미지 없음":
-        full_input = f"[사용자가 그린 그림: {image_description}]\n{user_text}"
+        full_input = f"{system_instruction}\n\n[사용자가 그린 그림 설명]: {image_description}\n[사용자 말]: {user_text}"
 
     text_input = session.TextInput(text=full_input)
     query_input = session.QueryInput(text=text_input, language_code="ko")
@@ -197,6 +210,35 @@ async def generate_image_from_text(prompt: str) -> str:
         if os.path.exists(output_path):
             os.remove(output_path)
 
+async def generate_prompt_from_history(history: list, user_text: str) -> str:
+    """
+    Stage 2.5 (Fallback): Use Gemini to generate a drawing prompt if the Agent didn't provide one.
+    """
+    logger.info("Stage 2.5: Generating draw prompt from history with Gemini...")
+    model = GenerativeModel("gemini-2.5-flash")
+    
+    history_text = ""
+    for msg in history:
+        role = "User" if msg.get("role") == "user" else "Assistant"
+        history_text += f"{role}: {msg.get('text')}\n"
+    
+    prompt = f"""
+    You are a creative assistant. The user wants to draw something based on the conversation.
+    Create a detailed image generation prompt in English based on the context below.
+    
+    Conversation History:
+    {history_text}
+    
+    Current Request:
+    {user_text}
+    
+    If the context is empty or unclear, generate a prompt for a "magical creative art studio".
+    Output ONLY the English prompt, no other text.
+    """
+    
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
 # ---------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------
@@ -207,7 +249,7 @@ async def chat_to_draw(
     user_text: str = Form(...),
     session_id: str = Form("default-session"),
     generate_image: bool = Form(True),
-    chat_history: str = Form("[]") # We ignore this for Dialogflow CX as it manages state
+    chat_history: str = Form("[]")
 ):
     try:
         # 1. Analyze Image (if provided)
@@ -220,15 +262,28 @@ async def chat_to_draw(
         # 2. Consult Agent (Dialogflow CX)
         agent_result = await consult_agent(session_id, user_text, image_desc)
         
+        draw_prompt = agent_result["draw_prompt"]
+        
+        # 2.5 Fallback: If generate_image is requested but Agent didn't give a prompt
+        if generate_image and not draw_prompt:
+            try:
+                history_list = json.loads(chat_history)
+            except:
+                history_list = []
+            
+            logger.info("⚠️ Agent didn't return a prompt. Using Gemini fallback.")
+            draw_prompt = await generate_prompt_from_history(history_list, user_text)
+            logger.info(f"🎨 Gemini generated prompt: {draw_prompt}")
+
         response_data = {
             "agent_message": agent_result["text"],
             "generated_image": None,
-            "draw_prompt": agent_result["draw_prompt"]
+            "draw_prompt": draw_prompt
         }
 
-        # 3. Generate Image (if Agent requested AND generate_image is True)
-        if agent_result["draw_prompt"] and generate_image:
-            image_url = await generate_image_from_text(agent_result["draw_prompt"])
+        # 3. Generate Image (if we have a prompt AND generate_image is True)
+        if draw_prompt and generate_image:
+            image_url = await generate_image_from_text(draw_prompt)
             response_data["generated_image"] = image_url
             
         return response_data
