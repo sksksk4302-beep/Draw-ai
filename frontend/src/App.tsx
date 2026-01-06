@@ -21,6 +21,7 @@ function App() {
   // Voice State
   const [isListening, setIsListening] = useState(false)
   const [transcript, setTranscript] = useState('')
+  const transcriptRef = useRef('') // Ref to keep track of transcript without triggering re-renders in useEffect
   const recognitionRef = useRef<any>(null)
 
   const canvasRef = useRef<CanvasHandle>(null)
@@ -46,13 +47,14 @@ function App() {
           interimTranscript += event.results[i][0].transcript
         }
         setTranscript(interimTranscript)
+        transcriptRef.current = interimTranscript
       }
 
       recognition.onend = () => {
         setIsListening(false)
         // Auto-send when speech ends if there is text
-        if (transcript.trim()) {
-          handleVoiceCommand(transcript)
+        if (transcriptRef.current.trim()) {
+          handleVoiceCommand(transcriptRef.current)
         }
       }
 
@@ -60,13 +62,15 @@ function App() {
     } else {
       console.warn("Web Speech API not supported")
     }
-  }, [transcript])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // Run only once
 
   const toggleListening = () => {
     if (isListening) {
       recognitionRef.current?.stop()
     } else {
       setTranscript('')
+      transcriptRef.current = ''
       // Switch to chat view when speaking starts
       setShowChat(true)
       recognitionRef.current?.start()
@@ -132,6 +136,9 @@ function App() {
       formData.append('user_text', "지금까지 이야기한 내용으로 그림 그려줘")
       formData.append('session_id', 'user-session-v1')
       formData.append('generate_image', 'true')
+
+      // Send chat history for context
+      formData.append('chat_history', JSON.stringify(chatHistory))
 
       const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080'
       const response = await axios.post(`${backendUrl}/chat-to-draw`, formData, {

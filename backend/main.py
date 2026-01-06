@@ -3,10 +3,15 @@ import io
 import uuid
 import logging
 import traceback
+import json
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+
+# Load .env file
+load_dotenv()
 
 # Google Cloud Imports
 import vertexai
@@ -74,7 +79,7 @@ async def analyze_image(image_bytes: bytes) -> str:
     logger.info(f"👀 Gemini detected: {description}")
     return description
 
-async def consult_agent(session_id: str, user_text: str, image_description: str) -> dict:
+async def consult_agent(session_id: str, user_text: str, image_description: str, chat_history: list = []) -> dict:
     """
     Stage 2 (Brain): Send context to Vertex AI Agent Builder.
     Returns a dict with 'text' (agent reply) and optional 'draw_prompt' (if agent decides to draw).
@@ -95,6 +100,14 @@ async def consult_agent(session_id: str, user_text: str, image_description: str)
 
     # Construct the input for the agent
     # We combine the image description and the user's voice command
+    # Format chat history
+    history_text = ""
+    if chat_history:
+        history_text = "\n[이전 대화 내용]\n"
+        for msg in chat_history:
+            role = "사용자" if msg.get("role") == "user" else "한울 선생님"
+            history_text += f"{role}: {msg.get('text')}\n"
+
     full_input = f"""
     [페르소나]
     당신은 아이들의 창의력을 길러주는 친절한 미술 선생님 '한울'입니다.
@@ -103,9 +116,10 @@ async def consult_agent(session_id: str, user_text: str, image_description: str)
     [상황 정보]
     사용자가 그린 그림: {image_description}
     사용자의 말: {user_text}
+    {history_text}
     
     [지시]
-    사용자의 말과 그림을 바탕으로 대답해주세요.
+    사용자의 말과 그림, 그리고 이전 대화 내용을 바탕으로 대답해주세요.
     만약 사용자가 그림을 완성해달라고 하거나 새로운 그림을 요청하면,
     그림을 그리기 위한 구체적인 영어 프롬프트를 'DRAW_PROMPT:' 접두사를 붙여서 마지막 줄에 적어주세요.
     그렇지 않고 대화가 더 필요하면 한국어로 대답만 해주세요.
@@ -200,7 +214,8 @@ async def chat_to_draw(
     file: Optional[UploadFile] = File(None),
     user_text: str = Form(...),
     session_id: str = Form("default-session"),
-    generate_image: bool = Form(True)
+    generate_image: bool = Form(True),
+    chat_history: str = Form("[]")
 ):
     try:
         # 1. Analyze Image (if provided)
@@ -211,7 +226,12 @@ async def chat_to_draw(
                 image_desc = await analyze_image(image_bytes)
         
         # 2. Consult Agent
-        agent_result = await consult_agent(session_id, user_text, image_desc)
+        try:
+            history_list = json.loads(chat_history)
+        except:
+            history_list = []
+            
+        agent_result = await consult_agent(session_id, user_text, image_desc, history_list)
         
         response_data = {
             "agent_message": agent_result["text"],
