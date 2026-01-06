@@ -14,7 +14,7 @@ function App() {
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([])
 
   const [resultImage, setResultImage] = useState<string | null>(null)
-  const [agentMessage, setAgentMessage] = useState<string | null>(null)
+  // const [agentMessage, setAgentMessage] = useState<string | null>(null) // Removed unused state
   const [isLoading, setIsLoading] = useState(false)
   const [cameraImage, setCameraImage] = useState<string | null>(null)
 
@@ -115,7 +115,7 @@ function App() {
 
       // Add agent response to chat
       setChatHistory(prev => [...prev, { role: 'agent', text: agent_message }])
-      setAgentMessage(agent_message) // Keep this for right panel if needed, or remove?
+      // setAgentMessage(agent_message) // Removed unused state
 
     } catch (error) {
       console.error(error)
@@ -145,7 +145,6 @@ function App() {
       }
       if (agent_message) {
         setChatHistory(prev => [...prev, { role: 'agent', text: agent_message }])
-        setAgentMessage(agent_message)
       }
 
     } catch (error) {
@@ -207,8 +206,8 @@ function App() {
               {chatHistory.map((msg, idx) => (
                 <div key={idx} className={`flex w-full mb-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[80%] p-4 rounded-2xl text-lg ${msg.role === 'user'
-                      ? 'bg-blue-500 text-white rounded-tr-none'
-                      : 'bg-white border-2 border-yellow-400 text-slate-800 rounded-tl-none shadow-sm'
+                    ? 'bg-blue-500 text-white rounded-tr-none'
+                    : 'bg-white border-2 border-yellow-400 text-slate-800 rounded-tl-none shadow-sm'
                     }`}>
                     {msg.role === 'agent' && <span className="block text-xs font-bold text-yellow-600 mb-1">한울 선생님</span>}
                     {msg.text}
