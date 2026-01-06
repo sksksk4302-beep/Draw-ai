@@ -199,7 +199,8 @@ async def generate_image_from_text(prompt: str) -> str:
 async def chat_to_draw(
     file: Optional[UploadFile] = File(None),
     user_text: str = Form(...),
-    session_id: str = Form("default-session")
+    session_id: str = Form("default-session"),
+    generate_image: bool = Form(True)
 ):
     try:
         # 1. Analyze Image (if provided)
@@ -214,11 +215,12 @@ async def chat_to_draw(
         
         response_data = {
             "agent_message": agent_result["text"],
-            "generated_image": None
+            "generated_image": None,
+            "draw_prompt": agent_result["draw_prompt"]
         }
 
-        # 3. Generate Image (if Agent requested)
-        if agent_result["draw_prompt"]:
+        # 3. Generate Image (if Agent requested AND generate_image is True)
+        if agent_result["draw_prompt"] and generate_image:
             image_url = await generate_image_from_text(agent_result["draw_prompt"])
             response_data["generated_image"] = image_url
             
