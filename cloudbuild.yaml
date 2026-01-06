@@ -33,9 +33,9 @@ steps:
       - '-c'
       - |
         echo "Fetching Cloud Run URL..."
-        SERVICE_URL=$(gcloud run services describe draw-ai-backend --platform managed --region us-central1 --format 'value(status.url)')
-        echo "Detected Backend URL: $SERVICE_URL"
-        echo "VITE_BACKEND_URL=$SERVICE_URL" > frontend/.env
+        SERVICE_URL=$$(gcloud run services describe draw-ai-backend --platform managed --region us-central1 --format 'value(status.url)')
+        echo "Detected Backend URL: $$SERVICE_URL"
+        echo "VITE_BACKEND_URL=$$SERVICE_URL" > frontend/.env
 
   # 5. Install & Build Frontend
   - name: 'node:20'
