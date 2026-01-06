@@ -18,7 +18,8 @@ import vertexai
 from vertexai.generative_models import GenerativeModel, Part
 from vertexai.preview.vision_models import ImageGenerationModel
 from google.cloud import storage
-from google.cloud import discoveryengine_v1beta as discoveryengine
+from google.cloud.dialogflowcx_v3beta1.services.sessions import SessionsClient
+from google.cloud.dialogflowcx_v3beta1.types import session
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -53,7 +54,7 @@ else:
 
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "service": "Magic Sketchbook Backend"}
+    return {"status": "ok", "service": "Magic Sketchbook Backend (Dialogflow CX)"}
 
 # ---------------------------------------------------------
 # Helper Functions
@@ -79,9 +80,9 @@ async def analyze_image(image_bytes: bytes) -> str:
     logger.info(f"👀 Gemini detected: {description}")
     return description
 
-async def consult_agent(session_id: str, user_text: str, image_description: str, chat_history: list = []) -> dict:
+async def consult_agent(session_id: str, user_text: str, image_description: str) -> dict:
     """
-    Stage 2 (Brain): Send context to Vertex AI Agent Builder.
+    Stage 2 (Brain): Send context to Vertex AI Agent (Dialogflow CX).
     Returns a dict with 'text' (agent reply) and optional 'draw_prompt' (if agent decides to draw).
     """
     logger.info(f"Stage 2: Consulting Agent (ID: {AGENT_ID})...")
@@ -90,55 +91,48 @@ async def consult_agent(session_id: str, user_text: str, image_description: str,
         logger.warning("AGENT_ID not set. Skipping agent.")
         return {"text": "Agent ID가 설정되지 않았습니다.", "draw_prompt": None}
 
-    client = discoveryengine.ConversationalSearchServiceClient()
-    serving_config = client.serving_config_path(
+    # Configure Dialogflow CX Client
+    if LOCATION != "global":
+        api_endpoint = f"{LOCATION}-dialogflow.googleapis.com"
+        client_options = {"api_endpoint": api_endpoint}
+    else:
+        client_options = None
+
+    client = SessionsClient(client_options=client_options)
+    session_path = client.session_path(
         project=PROJECT_ID,
         location=LOCATION,
-        data_store=AGENT_ID,
-        serving_config="default_serving_config",
+        agent=AGENT_ID,
+        session=session_id
     )
 
-    # Construct the input for the agent
-    # We combine the image description and the user's voice command
-    # Format chat history
-    history_text = ""
-    if chat_history:
-        history_text = "\n[이전 대화 내용]\n"
-        for msg in chat_history:
-            role = "사용자" if msg.get("role") == "user" else "한울 선생님"
-            history_text += f"{role}: {msg.get('text')}\n"
+    # Construct input
+    # We include the image description in the text if it's relevant
+    full_input = user_text
+    if image_description and image_description != "이미지 없음":
+        full_input = f"[사용자가 그린 그림: {image_description}]\n{user_text}"
 
-    full_input = f"""
-    [페르소나]
-    당신은 아이들의 창의력을 길러주는 친절한 미술 선생님 '한울'입니다.
-    아이들에게 다정하고 칭찬을 많이 해주는 말투를 사용하세요. (해요체 사용)
+    text_input = session.TextInput(text=full_input)
+    query_input = session.QueryInput(text=text_input, language_code="ko")
 
-    [상황 정보]
-    사용자가 그린 그림: {image_description}
-    사용자의 말: {user_text}
-    {history_text}
-    
-    [지시]
-    사용자의 말과 그림, 그리고 이전 대화 내용을 바탕으로 대답해주세요.
-    만약 사용자가 그림을 완성해달라고 하거나 새로운 그림을 요청하면,
-    그림을 그리기 위한 구체적인 영어 프롬프트를 'DRAW_PROMPT:' 접두사를 붙여서 마지막 줄에 적어주세요.
-    그렇지 않고 대화가 더 필요하면 한국어로 대답만 해주세요.
-    """
-
-    # Note: In a real app, you should manage session IDs properly
-    session_path = f"{serving_config}/sessions/{session_id}"
-
-    request = discoveryengine.ConverseConversationRequest(
-        name=session_path,
-        query=discoveryengine.TextInput(input=full_input),
+    request = session.DetectIntentRequest(
+        session=session_path,
+        query_input=query_input
     )
 
-    response = client.converse_conversation(request=request)
-    agent_reply = response.reply.summary.summary_text if response.reply.summary else response.reply.reply
+    response = client.detect_intent(request=request)
     
+    # Extract Agent Reply
+    agent_reply = ""
+    for message in response.query_result.response_messages:
+        if message.text:
+            agent_reply += message.text.text[0] + " "
+    
+    agent_reply = agent_reply.strip()
     logger.info(f"🧠 Agent Reply: {agent_reply}")
 
     # Parse Agent Reply for Drawing Intent
+    # We assume the agent is instructed to output "DRAW_PROMPT: ..." if it wants to draw.
     draw_prompt = None
     display_text = agent_reply
 
@@ -196,9 +190,7 @@ async def generate_image_from_text(prompt: str) -> str:
         blob = bucket.blob(destination_blob_name)
         blob.upload_from_filename(output_path, content_type="image/png")
         
-        # Make public (if bucket is not public, this might fail without proper IAM)
-        # For this demo, we assume bucket is readable or we use signed URL.
-        # But to keep it simple as per previous code:
+        # Make public
         public_url = f"https://storage.googleapis.com/{bucket_name}/{destination_blob_name}"
         return public_url
     finally:
@@ -215,7 +207,7 @@ async def chat_to_draw(
     user_text: str = Form(...),
     session_id: str = Form("default-session"),
     generate_image: bool = Form(True),
-    chat_history: str = Form("[]")
+    chat_history: str = Form("[]") # We ignore this for Dialogflow CX as it manages state
 ):
     try:
         # 1. Analyze Image (if provided)
@@ -225,13 +217,8 @@ async def chat_to_draw(
             if len(image_bytes) > 0:
                 image_desc = await analyze_image(image_bytes)
         
-        # 2. Consult Agent
-        try:
-            history_list = json.loads(chat_history)
-        except:
-            history_list = []
-            
-        agent_result = await consult_agent(session_id, user_text, image_desc, history_list)
+        # 2. Consult Agent (Dialogflow CX)
+        agent_result = await consult_agent(session_id, user_text, image_desc)
         
         response_data = {
             "agent_message": agent_result["text"],
@@ -251,16 +238,13 @@ async def chat_to_draw(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# Keep the old endpoint for backward compatibility if needed
 @app.post("/generate-image")
 async def generate_image_legacy(
     file: UploadFile = File(...),
     style_prompt: str = Form("3D render")
 ):
-    # Reuse the new logic but simulate a direct request
     image_bytes = await file.read()
     desc = await analyze_image(image_bytes)
-    # Skip agent, go straight to drawing
     prompt = f"A cute, 3D rendered digital art of {desc}. Style: {style_prompt}"
     url = await generate_image_from_text(prompt)
     return {"image": url, "description": desc}
