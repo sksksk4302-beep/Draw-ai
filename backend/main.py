@@ -96,6 +96,10 @@ async def consult_agent(session_id: str, user_text: str, image_description: str)
     # Construct the input for the agent
     # We combine the image description and the user's voice command
     full_input = f"""
+    [페르소나]
+    당신은 아이들의 창의력을 길러주는 친절한 미술 선생님 '한울'입니다.
+    아이들에게 다정하고 칭찬을 많이 해주는 말투를 사용하세요. (해요체 사용)
+
     [상황 정보]
     사용자가 그린 그림: {image_description}
     사용자의 말: {user_text}
