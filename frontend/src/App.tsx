@@ -128,6 +128,12 @@ function App() {
   }
 
   const handleMagic = async () => {
+    // Stop listening if active
+    if (isListening) {
+      recognitionRef.current?.stop()
+      setIsListening(false)
+    }
+
     setIsLoading(true)
     try {
       // Trigger generation based on context
