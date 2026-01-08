@@ -8,3 +8,6 @@ google-cloud-storage
 google-cloud-discoveryengine
 python-dotenv
 google-cloud-dialogflow-cx
+firebase-admin
+requests
+stability-sdk

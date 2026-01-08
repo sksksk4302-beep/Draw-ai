@@ -20,6 +20,9 @@ from vertexai.preview.vision_models import ImageGenerationModel
 from google.cloud import storage
 from google.cloud.dialogflowcx_v3beta1.services.sessions import SessionsClient
 from google.cloud.dialogflowcx_v3beta1.types import session
+import firebase_admin
+from firebase_admin import credentials, firestore
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +54,34 @@ if PROJECT_ID:
         logger.error(f"Failed to initialize Vertex AI: {e}")
 else:
     logger.warning("GOOGLE_CLOUD_PROJECT env var not set. AI calls will fail.")
+
+# Initialize Firebase
+try:
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app()
+    db = firestore.client()
+    logger.info("Firebase initialized.")
+    db = firestore.client()
+    logger.info("Firebase initialized.")
+except Exception as e:
+    logger.error(f"Failed to initialize Firebase: {e}")
+    db = None
+
+# ---------------------------------------------------------
+# Models
+# ---------------------------------------------------------
+from pydantic import BaseModel
+
+class LoginRequest(BaseModel):
+    uid: str
+    email: Optional[str] = None
+    display_name: Optional[str] = None
+
+class LoginResponse(BaseModel):
+    uid: str
+    potions: int
+    role: str
+    is_new_user: bool
 
 @app.get("/")
 async def health_check():
@@ -238,7 +269,71 @@ async def generate_prompt_from_history(history: list, user_text: str) -> str:
     """
     
     response = model.generate_content(prompt)
+    response = model.generate_content(prompt)
     return response.text.strip()
+
+async def generate_image_cheap(prompt: str) -> str:
+    """
+    Stage 3-B (Cheap): Generate image using a cheaper model (e.g., Stable Diffusion).
+    For now, this is a placeholder or can use a lower quality setting.
+    """
+    logger.info(f"Generating cheap image for: {prompt}")
+    # TODO: Implement actual Stable Diffusion API call here
+    # For demonstration, we'll use a placeholder or the same model if needed, 
+    # but strictly speaking this should be a different cheaper API.
+    # Returning a placeholder for now to indicate the flow.
+    return "https://placehold.co/600x400/png?text=Cheap+Image+Mode"
+
+def save_to_gallery(uid: str, image_url: str, prompt: str, style_type: str = "premium"):
+    if not db:
+        logger.warning("DB not initialized, skipping save.")
+        return
+    
+    try:
+        doc_ref = db.collection("gallery").document()
+        doc_ref.set({
+            "uid": uid,
+            "image_url": image_url,
+            "prompt": prompt,
+            "style_type": style_type,
+            "created_at": datetime.utcnow()
+        })
+        logger.info(f"Saved to gallery: {doc_ref.id}")
+        logger.info(f"Saved to gallery: {doc_ref.id}")
+    except Exception as e:
+        logger.error(f"Failed to save to gallery: {e}")
+
+def get_user_potions(uid: str) -> int:
+    if not db: return 0
+    try:
+        doc = db.collection("users").document(uid).get()
+        if doc.exists:
+            return doc.to_dict().get("potions", 0)
+        return 0
+    except:
+        return 0
+
+def deduct_potion(uid: str, amount: int = 1) -> bool:
+    if not db: return False
+    try:
+        user_ref = db.collection("users").document(uid)
+        
+        @firestore.transactional
+        def update_in_transaction(transaction, ref):
+            snapshot = transaction.get(ref)
+            if not snapshot.exists:
+                return False
+            current_potions = snapshot.get("potions")
+            if current_potions < amount:
+                return False
+            transaction.update(ref, {"potions": current_potions - amount})
+            return True
+
+        transaction = db.transaction()
+        return update_in_transaction(transaction, user_ref)
+    except Exception as e:
+        logger.error(f"Potion deduction failed: {e}")
+        return False
 
 # ---------------------------------------------------------
 # Endpoints
@@ -250,7 +345,9 @@ async def chat_to_draw(
     user_text: str = Form(...),
     session_id: str = Form("default-session"),
     generate_image: bool = Form(True),
-    chat_history: str = Form("[]")
+    chat_history: str = Form("[]"),
+    uid: str = Form("anonymous"),
+    style_type: str = Form("premium") # premium or cheap
 ):
     try:
         # 1. Analyze Image (if provided)
@@ -284,8 +381,20 @@ async def chat_to_draw(
 
         # 3. Generate Image (if we have a prompt AND generate_image is True)
         if draw_prompt and generate_image:
-            image_url = await generate_image_from_text(draw_prompt)
+            # Check Potions for Premium Mode (if User)
+            if style_type == "premium" and uid != "anonymous":
+                if not deduct_potion(uid, 1):
+                    raise HTTPException(status_code=402, detail="NOT_ENOUGH_POTIONS")
+
+            if style_type == "cheap":
+                image_url = await generate_image_cheap(draw_prompt)
+            else:
+                image_url = await generate_image_from_text(draw_prompt)
+            
             response_data["generated_image"] = image_url
+            
+            # Save to Gallery
+            save_to_gallery(uid, image_url, draw_prompt, style_type)
             
         return response_data
 
@@ -304,3 +413,61 @@ async def generate_image_legacy(
     prompt = f"A cute, 3D rendered digital art of {desc}. Style: {style_prompt}"
     url = await generate_image_from_text(prompt)
     return {"image": url, "description": desc}
+    return {"image": url, "description": desc}
+
+@app.get("/api/gallery")
+async def get_gallery(uid: str):
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    try:
+        # Note: Requires an index on 'uid' and 'created_at' DESC in Firestore
+        docs = db.collection("gallery").where("uid", "==", uid).order_by("created_at", direction=firestore.Query.DESCENDING).stream()
+        return [{"id": doc.id, **doc.to_dict()} for doc in docs]
+    except Exception as e:
+        logger.error(f"Error fetching gallery: {e}")
+        # Fallback if index is missing or other error
+        docs = db.collection("gallery").where("uid", "==", uid).stream()
+        items = [{"id": doc.id, **doc.to_dict()} for doc in docs]
+        # Sort in memory if query fails
+        items.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        return items
+        items.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        return items
+
+@app.post("/api/auth/login", response_model=LoginResponse)
+async def login(request: LoginRequest):
+    if not db:
+        raise HTTPException(status_code=500, detail="Database error")
+    
+    try:
+        user_ref = db.collection("users").document(request.uid)
+        doc = user_ref.get()
+        
+        if doc.exists:
+            user_data = doc.to_dict()
+            return LoginResponse(
+                uid=request.uid,
+                potions=user_data.get("potions", 0),
+                role=user_data.get("role", "user"),
+                is_new_user=False
+            )
+        else:
+            # New User - Give 2 Potions
+            new_user = {
+                "uid": request.uid,
+                "email": request.email,
+                "display_name": request.display_name,
+                "potions": 2,
+                "role": "user",
+                "created_at": datetime.utcnow()
+            }
+            user_ref.set(new_user)
+            return LoginResponse(
+                uid=request.uid,
+                potions=2,
+                role="user",
+                is_new_user=True
+            )
+    except Exception as e:
+        logger.error(f"Login error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
