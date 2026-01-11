@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+google-cloud-aiplatform
+python-multipart
+pydantic
+Pillow
+google-cloud-storage
+google-cloud-discoveryengine
+python-dotenv
+google-cloud-dialogflow-cx
