@@ -14,7 +14,6 @@ function App() {
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([])
 
   const [resultImage, setResultImage] = useState<string | null>(null)
-  // const [agentMessage, setAgentMessage] = useState<string | null>(null) // Removed unused state
   const [isLoading, setIsLoading] = useState(false)
   const [cameraImage, setCameraImage] = useState<string | null>(null)
 
@@ -82,9 +81,6 @@ function App() {
     // Add user message to chat immediately
     setChatHistory(prev => [...prev, { role: 'user', text }])
 
-    // We don't set global loading here to avoid blocking UI, maybe just a typing indicator in chat?
-    // But for now let's keep it simple.
-
     try {
       let imageData = ''
       if (mode === 'draw') {
@@ -99,9 +95,6 @@ function App() {
       formData.append('generate_image', 'false') // Don't generate image yet
 
       if (imageData && !showChat) {
-        // Only send image if we are NOT in chat mode? 
-        // Actually user might want to talk about the drawing they just did.
-        // So we should send the image if it exists.
         const res = await fetch(imageData)
         const blob = await res.blob()
         if (blob.size > 1000) {
@@ -119,7 +112,6 @@ function App() {
 
       // Add agent response to chat
       setChatHistory(prev => [...prev, { role: 'agent', text: agent_message }])
-      // setAgentMessage(agent_message) // Removed unused state
 
     } catch (error) {
       console.error(error)
@@ -136,14 +128,10 @@ function App() {
 
     setIsLoading(true)
     try {
-      // Trigger generation based on context
-      // We send a generic "Draw it" command with generate_image=true
       const formData = new FormData()
       formData.append('user_text', "지금까지 이야기한 내용으로 그림 그려줘")
       formData.append('session_id', 'user-session-v1')
       formData.append('generate_image', 'true')
-
-      // Send chat history for context
       formData.append('chat_history', JSON.stringify(chatHistory))
 
       const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080'
@@ -181,46 +169,41 @@ function App() {
 
   return (
     <div className="flex h-screen w-full bg-slate-50 overflow-hidden font-sans">
-      {/* [수정] 왼쪽 패널: 캔버스 작업 영역을 넓게 사용 */}
-      <div className="flex-1 h-full flex flex-col relative bg-white">
+      {/* 왼쪽 패널: 캔버스/카메라 작업 영역 (1:1 비율) */}
+      <div className="w-1/2 h-full flex flex-col relative bg-white p-4 border-r border-slate-200">
 
-        {/* [아이디어] 상단 대화창을 오버레이로 배치 (캔버스 공간 확보) */}
-        <div className="absolute top-6 left-1/2 -translate-x-1/2 z-20 w-[90%] max-w-xl">
-          <div className="bg-white/80 backdrop-blur-md border border-slate-200 p-3 rounded-2xl shadow-sm text-center">
-            {isListening ? (
-              <span className="text-purple-600 animate-pulse font-medium">🎤 듣고 있어요: {transcript}</span>
-            ) : (
-              <span className="text-slate-500 text-sm">{transcript || "무엇을 그려볼까요? 선생님에게 말해보세요!"}</span>
-            )}
-          </div>
+        {/* 우측 상단 모드 전환 아이콘 */}
+        <div className="absolute top-4 right-4 z-20 flex gap-2 bg-white/90 backdrop-blur-sm p-2 rounded-xl shadow-lg border border-slate-200">
+          <button
+            onClick={() => { setMode('draw'); setShowChat(false); }}
+            className={`p-2 rounded-lg transition-all ${mode === 'draw' && !showChat ? 'bg-blue-100 text-blue-600' : 'text-slate-400 hover:bg-slate-100'}`}
+            title="Draw"
+          >
+            <Pencil size={20} />
+          </button>
+          <button
+            onClick={() => { setMode('camera'); setShowChat(false); }}
+            className={`p-2 rounded-lg transition-all ${mode === 'camera' && !showChat ? 'bg-green-100 text-green-600' : 'text-slate-400 hover:bg-slate-100'}`}
+            title="Camera"
+          >
+            <Camera size={20} />
+          </button>
+          <button
+            onClick={() => setShowChat(!showChat)}
+            className={`p-2 rounded-lg transition-all ${showChat ? 'bg-yellow-100 text-yellow-600' : 'text-slate-400 hover:bg-slate-100'}`}
+            title="Chat"
+          >
+            <MessageSquare size={20} />
+          </button>
         </div>
 
-        {/* 메인 콘텐츠 영역 (캔버스가 전체를 차지) */}
-        <div className="flex-1 relative overflow-hidden">
-          {showChat ? (
-            <div className="w-full h-full flex flex-col bg-slate-50 p-6 pt-24 overflow-y-auto">
-              {/* 채팅 내역 출력 */}
-              {chatHistory.length === 0 && (
-                <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
-                  <MessageSquare size={48} className="mb-2 opacity-50" />
-                  <p>선생님과 대화를 시작해보세요!</p>
-                </div>
-              )}
-              {chatHistory.map((msg, idx) => (
-                <div key={idx} className={`flex w-full mb-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[80%] p-4 rounded-2xl ${msg.role === 'user' ? 'bg-blue-500 text-white' : 'bg-white border-2 border-yellow-400'}`}>
-                    {msg.role === 'agent' && <span className="block text-xs font-bold text-yellow-600 mb-1">한울 선생님</span>}
-                    {msg.text}
-                  </div>
-                </div>
-              ))}
-              <div ref={chatEndRef} />
-            </div>
-          ) : mode === 'draw' ? (
-            <div className="w-full h-full pt-16"> {/* 상단 대화창 자리를 위한 패딩 */}
+        {/* 메인 콘텐츠 영역 */}
+        <div className="flex-1 bg-white rounded-2xl shadow-inner overflow-hidden relative border-4 border-slate-200">
+          {mode === 'draw' ? (
+            <>
               <Canvas ref={canvasRef} className="w-full h-full cursor-crosshair" />
-              {/* 그림판 도구는 캔버스 우측 하단에 작게 배치 */}
-              <div className="absolute bottom-24 right-6 flex flex-col gap-2">
+              {/* 그림판 도구 */}
+              <div className="absolute bottom-4 right-4 flex flex-col gap-2">
                 <button onClick={() => canvasRef.current?.undo()} className="p-3 bg-white shadow-md hover:bg-slate-100 rounded-full text-slate-700 border border-slate-200">
                   <Undo size={20} />
                 </button>
@@ -228,10 +211,9 @@ function App() {
                   <Trash2 size={20} />
                 </button>
               </div>
-            </div>
+            </>
           ) : (
-            <div className="w-full h-full flex items-center justify-center pt-16 relative bg-slate-50">
-              {/* 카메라 프리뷰 로직 */}
+            <div className="w-full h-full flex items-center justify-center relative bg-slate-50">
               {cameraImage ? (
                 <img src={cameraImage} alt="Preview" className="max-h-full object-contain rounded-lg" />
               ) : (
@@ -251,65 +233,82 @@ function App() {
           )}
         </div>
 
-        {/* [개선] 하단 Speak & Magic 버튼을 플로팅 형태로 변경 */}
-        <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex gap-4 z-30">
-          <button
-            onClick={toggleListening}
-            className={`px-8 py-4 rounded-full font-bold text-xl shadow-2xl transition-all flex items-center gap-3 ${isListening ? 'bg-red-500 text-white scale-110' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
-          >
-            {isListening ? <MicOff /> : <Mic />} Speak
-          </button>
-          <button
-            onClick={handleMagic}
-            disabled={isLoading}
-            className="px-8 py-4 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-full font-bold text-xl shadow-2xl hover:scale-105 active:scale-95 transition-all flex items-center gap-3 disabled:opacity-50"
-          >
-            {isLoading ? <Loader2 className="animate-spin" /> : <Wand2 />} Magic
-          </button>
+        {/* Chat 영역 - Chat 버튼 클릭 시에만 표시 (Speak 위에 배치) */}
+        {showChat && (
+          <div className="mt-4 mb-2 bg-slate-50 rounded-2xl shadow-inner border-2 border-slate-200 overflow-hidden" style={{ height: '200px' }}>
+            <div className="w-full h-full flex flex-col p-4 overflow-y-auto">
+              {chatHistory.length === 0 && (
+                <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
+                  <MessageSquare size={32} className="mb-2 opacity-50" />
+                  <p className="text-sm">선생님과 대화를 시작해보세요!</p>
+                </div>
+              )}
+              {chatHistory.map((msg, idx) => (
+                <div key={idx} className={`flex w-full mb-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[80%] p-3 rounded-xl text-sm ${msg.role === 'user' ? 'bg-blue-500 text-white' : 'bg-white border-2 border-yellow-400'}`}>
+                    {msg.role === 'agent' && <span className="block text-xs font-bold text-yellow-600 mb-1">한울 선생님</span>}
+                    {msg.text}
+                  </div>
+                </div>
+              ))}
+              <div ref={chatEndRef} />
+            </div>
+          </div>
+        )}
+
+        {/* Voice Interaction Area - Speak & Magic 버튼 */}
+        <div className="mt-4 flex flex-col items-center gap-3">
+          <div className="min-h-[3rem] w-full flex items-center justify-center text-center p-2 bg-white rounded-xl shadow-sm border border-slate-100">
+            {isListening ? (
+              <span className="text-purple-600 animate-pulse font-medium">🎤 듣고 있어요: {transcript}</span>
+            ) : (
+              <span className="text-slate-400">{transcript || "마이크를 누르고 말해보세요!"}</span>
+            )}
+          </div>
+
+          <div className="flex w-full gap-2">
+            <button
+              onClick={toggleListening}
+              className={`flex-1 py-4 rounded-2xl font-black text-2xl shadow-xl hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-3 ${isListening ? 'bg-red-500 text-white animate-pulse' : 'bg-gradient-to-r from-blue-500 to-cyan-500 text-white'}`}
+            >
+              {isListening ? <MicOff className="w-8 h-8" /> : <Mic className="w-8 h-8" />}
+              {isListening ? "Stop" : "Speak"}
+            </button>
+
+            <button
+              onClick={handleMagic}
+              disabled={isLoading}
+              className="flex-1 py-4 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-2xl font-black text-2xl shadow-xl hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-3 disabled:opacity-70 disabled:cursor-not-allowed"
+            >
+              {isLoading ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Wand2 className="w-8 h-8" />
+              )}
+              Magic
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* 오른쪽 패널: AI 결과 및 모드 컨트롤 */}
-      <div className="w-[400px] h-full bg-slate-100 border-l border-slate-200 flex flex-col">
-        {/* [수정] 모드 전환 버튼을 이쪽 상단으로 이동 */}
-        <div className="bg-white p-3 flex justify-around border-b">
-          <button
-            onClick={() => { setMode('draw'); setShowChat(false); }}
-            className={`p-3 rounded-xl transition-all ${mode === 'draw' && !showChat ? 'bg-blue-100 text-blue-600' : 'text-slate-400'}`}
-          >
-            <Pencil size={24} /><span className="text-[10px] font-bold block">Draw</span>
-          </button>
-          <button
-            onClick={() => { setMode('camera'); setShowChat(false); }}
-            className={`p-3 rounded-xl transition-all ${mode === 'camera' && !showChat ? 'bg-green-100 text-green-600' : 'text-slate-400'}`}
-          >
-            <Camera size={24} /><span className="text-[10px] font-bold block">Camera</span>
-          </button>
-          <button
-            onClick={() => setShowChat(true)}
-            className={`p-3 rounded-xl transition-all ${showChat ? 'bg-yellow-100 text-yellow-600' : 'text-slate-400'}`}
-          >
-            <MessageSquare size={24} /><span className="text-[10px] font-bold block">Chat</span>
-          </button>
-        </div>
-
-        {/* AI 생성 결과 영역 */}
-        <div className="flex-1 p-4 flex flex-col">
-          <div className="flex-1 bg-white rounded-3xl shadow-lg border-4 border-purple-50 overflow-hidden flex items-center justify-center relative">
-            {isLoading ? (
-              <div className="text-center">
-                <Loader2 className="w-12 h-12 text-purple-500 animate-spin mx-auto mb-2" />
-                <p className="text-purple-600 font-bold">그리는 중...</p>
+      {/* 오른쪽 패널: AI 결과 (1:1 비율 유지) */}
+      <div className="w-1/2 h-full p-4 bg-slate-100 flex flex-col gap-4">
+        <div className="flex-1 bg-white rounded-2xl shadow-lg border-4 border-purple-100 overflow-hidden flex items-center justify-center relative">
+          {isLoading ? (
+            <div className="flex flex-col items-center gap-4">
+              <Loader2 className="w-16 h-16 text-purple-500 animate-spin" />
+              <p className="text-xl font-bold text-purple-600 animate-pulse">그림을 그리는 중이에요...</p>
+            </div>
+          ) : resultImage ? (
+            <img src={resultImage} alt="Magic Result" className="max-w-full max-h-full object-contain" />
+          ) : (
+            <div className="text-center text-slate-400 p-8">
+              <div className="w-32 h-32 bg-slate-50 rounded-full mx-auto mb-4 flex items-center justify-center">
+                <Wand2 size={48} className="text-slate-300" />
               </div>
-            ) : resultImage ? (
-              <img src={resultImage} alt="Result" className="w-full h-full object-contain" />
-            ) : (
-              <div className="text-slate-300 text-center">
-                <Wand2 size={48} className="mx-auto mb-2 opacity-20" />
-                <p>결과가 여기에 표시됩니다</p>
-              </div>
-            )}
-          </div>
+              <p className="text-xl font-medium">Magic 버튼을 누르면<br />여기에 그림이 나타나요!</p>
+            </div>
+          )}
         </div>
       </div>
     </div>
